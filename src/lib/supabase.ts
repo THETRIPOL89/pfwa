@@ -251,6 +251,31 @@ type InsightTable = {
   Relationships: EmptyRels;
 };
 
+type NewsCacheTable = {
+  Row: {
+    id: string;
+    source: string;
+    title: string;
+    url: string;
+    published_at: string;
+    summary: string | null;
+    category: string | null;
+    fetched_at: string;
+  };
+  Insert: {
+    id: string;
+    source: string;
+    title: string;
+    url: string;
+    published_at: string;
+    summary?: string | null;
+    category?: string | null;
+    fetched_at?: string;
+  };
+  Update: Partial<NewsCacheTable['Insert']>;
+  Relationships: EmptyRels;
+};
+
 export type Database = {
   // Required by supabase-js v2.112+ to enable typed Postgrest queries.
   __InternalSupabase: { PostgrestVersion: '12' };
@@ -265,6 +290,7 @@ export type Database = {
       investments: InvestmentTable;
       dividends: DividendTable;
       insights: InsightTable;
+      news_cache: NewsCacheTable;
     };
     Functions: {
       dashboard_balance_timeline: {

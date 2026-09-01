@@ -68,7 +68,7 @@ async function fetchRss2Json(feed: typeof FEEDS[number]): Promise<NewsArticle[]>
   const resp = await fetch(url);
   if (!resp.ok) throw new Error(`rss2json returned ${resp.status}`);
   const json = (await resp.json()) as Rss2JsonResponse;
-  if (json.status !== 'ok' || !json.items) return 0;
+  if (json.status !== 'ok' || !json.items) return [];
   return json.items.map((it) => ({
     id: hashString(it.link),
     title: stripHtml(it.title).slice(0, 200),
