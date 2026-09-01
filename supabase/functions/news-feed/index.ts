@@ -1,11 +1,12 @@
 // Supabase Edge Function: news-feed
-// Aggregates Google News RSS feeds for finance-related queries, normalizes
-// each article, deduplicates by URL, and returns a flat list.
+// Aggregates RSS feeds from Italian financial newspapers (Il Sole 24 Ore,
+// ANSA, La Repubblica, etc.) directly. We deliberately avoid Google News
+// RSS — Supabase Edge Function egress is blocked from Google News.
 //
 // Three-tier fallback so /api/news-feed never returns 500:
 //   1. Cache DB fresca (<15 min) → return immediately
-//   2. Google News (via allorigins proxy) → fetch + cache write
-//   3. Mock hardcoded → guaranteed response even with all providers down
+//   2. Direct RSS from Italian outlets → fetch + cache write
+//   3. Hardcoded fallback → guaranteed response
 //
 // Local run: supabase functions serve news-feed
 // Deploy:    supabase functions deploy news-feed --no-verify-jwt
@@ -21,18 +22,20 @@ const SUPABASE_URL = Deno.env.get('SUPABASE_URL') ?? '';
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
 const CACHE_TTL_MS = 1000 * 60 * 15;
 
-const QUERIES: Record<string, string> = {
-  mercati: 'mercati+azionari+italia',
-  crypto: 'criptovalute+bitcoin',
-  economia: 'economia+italia',
-  aziende: 'aziende+italiane+piazza+affari',
-  personale: 'finanza+personale+risparmio',
-};
+interface FeedSource {
+  url: string;
+  source: string;
+  category: 'mercati' | 'economia' | 'aziende';
+}
 
-// Hardcoded fallback: ensures /api/news-feed always returns data, even if
-// every provider and cache layer is unavailable. Articles are illustrative
-// finance headlines in Italian — they will appear as long as `publishedAt`
-// is in the past so `timeAgo` formats sensibly.
+const FEEDS: FeedSource[] = [
+  { url: 'https://www.ilsole24ore.com/rss/finanza.xml', source: 'Il Sole 24 Ore', category: 'mercati' },
+  { url: 'https://www.ilsole24ore.com/rss/economia.xml', source: 'Il Sole 24 Ore', category: 'economia' },
+  { url: 'https://www.ansa.it/sito/notizie/economia/economia.shtml', source: 'ANSA', category: 'economia' },
+  { url: 'https://www.repubblica.it/rss/economia/rss2.0.xml', source: 'La Repubblica', category: 'economia' },
+  { url: 'https://www.corriere.it/rss/ Economia.xml', source: 'Corriere della Sera', category: 'economia' },
+];
+
 const FALLBACK_NEWS = [
   {
     id: 'fb-1',
@@ -58,7 +61,7 @@ const FALLBACK_NEWS = [
     source: 'CoinDesk',
     url: 'https://example.com/btc-65000',
     summary:
-      'Il rally delle criptovalute prosegue, con Ethereum che segue a +4,5% e Sol che segna nuovi massimi.',
+      'Il rally delle criptovalute prosegue, con Ethereum che segue a +4,5%.',
     category: 'crypto',
   },
   {
@@ -93,7 +96,7 @@ const FALLBACK_NEWS = [
     title: 'Spread BTP-Bund scende sotto i 95 punti, mercati ottimisti',
     source: 'Bloomberg',
     url: 'https://example.com/btp-bund',
-    summary: 'Il differenziale con i titoli tedeschi continua a stringersi, segnale di fiducia.',
+    summary: 'Il differenziale con i titoli tedeschi continua a stringersi.',
     category: 'mercati',
   },
   {
@@ -104,102 +107,7 @@ const FALLBACK_NEWS = [
     summary: "Gli analisti alzano il target price a 250$ dopo l'annuncio delle funzioni AI.",
     category: 'aziende',
   },
-  {
-    id: 'fb-9',
-    title: 'Mutui: tassi fissi sotto il 3%, è il momento giusto?',
-    source: 'Il Sole 24 Ore',
-    url: 'https://example.com/mutui-tassi',
-    summary: 'Le banche offrono condizioni competitive per i mutui prima casa, TAEG al minimo storico.',
-    category: 'personale',
-  },
-  {
-    id: 'fb-10',
-    title: 'Inflazione area euro: -0,3% su base mensile, alimentari in calo',
-    source: 'Eurostat',
-    url: 'https://example.com/inflazione-eurostat',
-    summary: 'I dati confermano il trend disinflazionistico in tutta Europa.',
-    category: 'economia',
-  },
-  {
-    id: 'fb-11',
-    title: 'ETF: i 5 fondi più sottoscritti dagli italiani nel 2026',
-    source: 'Morningstar',
-    url: 'https://example.com/etf-top-5',
-    summary: 'VWRL, iShares Core MSCI World e Amundi MSCI Europe guidano la classifica.',
-    category: 'mercati',
-  },
-  {
-    id: 'fb-12',
-    title: 'Regole di gestione finanziaria personale: il metodo 50/30/20',
-    source: 'Personal Finance Lab',
-    url: 'https://example.com/metodo-50-30-20',
-    summary:
-      'Come ripartire lo stipendio tra necessità, desideri e risparmio in modo sostenibile.',
-    category: 'personale',
-  },
 ];
-
-interface RawArticle {
-  title: string;
-  link: string;
-  pubDate: string;
-  source?: string;
-  description?: string;
-}
-
-async function fetchRss(query: string): Promise<RawArticle[]> {
-  const rssUrl = `https://news.google.com/rss/search?q=${encodeURIComponent(query)}&hl=it&gl=IT&ceid=IT:it`;
-  const proxyUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(rssUrl)}`;
-  let xml = '';
-  for (const target of [proxyUrl, rssUrl]) {
-    try {
-      const resp = await fetch(target, {
-        headers: { 'User-Agent': 'Mozilla/5.0 PFWA/1.0' },
-      });
-      if (!resp.ok) throw new Error(`fetch returned ${resp.status}`);
-      xml = await resp.text();
-      if (xml.includes('<item>')) break;
-    } catch (e) {
-      console.error('news-feed proxy attempt failed', target, e);
-    }
-  }
-  if (!xml.includes('<item>')) throw new Error('All fetch attempts failed');
-  const items: RawArticle[] = [];
-  const itemRe = /<item>([\s\S]*?)<\/item>/g;
-  const fields = {
-    title: /<title>([\s\S]*?)<\/title>/,
-    link: /<link>([\s\S]*?)<\/link>/,
-    pubDate: /<pubDate>([\s\S]*?)<\/pubDate>/,
-    source: /<source[^>]*>([\s\S]*?)<\/source>/,
-    description: /<description>([\s\S]*?)<\/description>/,
-  };
-  let m: RegExpExecArray | null;
-  while ((m = itemRe.exec(xml))) {
-    const block = m[1];
-    const pick = (re: RegExp) => {
-      const r = block.match(re);
-      return r ? r[1].trim() : '';
-    };
-    items.push({
-      title: pick(fields.title).replace(/<!\[CDATA\[(.*?)\]\]>/g, '$1'),
-      link: pick(fields.link),
-      pubDate: pick(fields.pubDate),
-      source: pick(fields.source),
-      description: pick(fields.description),
-    });
-  }
-  return items;
-}
-
-function hashString(s: string): string {
-  let h = 0;
-  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0;
-  return `n-${h.toString(36)}`;
-}
-
-function stripHtml(s: string): string {
-  return s.replace(/<[^>]+>/g, '').replace(/&[a-z]+;/g, ' ').trim();
-}
 
 interface NewsRow {
   id: string;
@@ -224,10 +132,9 @@ function rowToArticle(r: NewsRow) {
   };
 }
 
-async function readCache(category: string): Promise<NewsRow[] | null> {
+async function readCache(): Promise<NewsRow[] | null> {
   if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) return null;
-  const filter = category === 'all' ? '' : `&category=eq.${encodeURIComponent(category)}`;
-  const url = `${SUPABASE_URL}/rest/v1/news_cache?select=*&order=published_at.desc&limit=30${filter}`;
+  const url = `${SUPABASE_URL}/rest/v1/news_cache?select=*&order=published_at.desc&limit=30`;
   const resp = await fetch(url, {
     headers: {
       apikey: SUPABASE_SERVICE_ROLE_KEY,
@@ -238,11 +145,8 @@ async function readCache(category: string): Promise<NewsRow[] | null> {
   return (await resp.json()) as NewsRow[];
 }
 
-async function writeCache(category: string, articles: NewsRow[]): Promise<void> {
+async function writeCache(articles: NewsRow[]): Promise<void> {
   if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY || articles.length === 0) return;
-  if (category !== 'all') {
-    articles = articles.map((a) => ({ ...a, category }));
-  }
   await fetch(`${SUPABASE_URL}/rest/v1/news_cache?on_conflict=url`, {
     method: 'POST',
     headers: {
@@ -263,20 +167,96 @@ function freshEnough(rows: NewsRow[]): boolean {
   return Date.now() - new Date(newest.fetched_at).getTime() < CACHE_TTL_MS;
 }
 
-function fallbackFor(category: string) {
-  // Filter fallback by category. 'all' returns everything.
-  const now = new Date();
-  const items = category === 'all'
-    ? FALLBACK_NEWS
-    : FALLBACK_NEWS.filter((n) => n.category === category);
-  // Stamp each item with a staggered publishedAt so the ordering looks
-  // realistic (most recent first).
-  return items.map((n, i) => ({
+function hashString(s: string): string {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0;
+  return `n-${h.toString(36)}`;
+}
+
+function stripHtml(s: string): string {
+  return s.replace(/<[^>]+>/g, '').replace(/&[a-z]+;/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+function decodeEntities(s: string): string {
+  return s
+    .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&apos;/g, "'");
+}
+
+function parseRssDate(s: string): string {
+  const d = new Date(s);
+  if (isNaN(d.getTime())) return new Date().toISOString();
+  return d.toISOString();
+}
+
+function parseRss(xml: string, source: string, defaultCategory: string): NewsRow[] {
+  const items: NewsRow[] = [];
+  const itemRe = /<item>([\s\S]*?)<\/item>/g;
+  const fields = {
+    title: /<title>([\s\S]*?)<\/title>/,
+    link: /<link>([\s\S]*?)<\/link>/,
+    pubDate: /<pubDate>([\s\S]*?)<\/pubDate>/,
+    description: /<description>([\s\S]*?)<\/description>/,
+  };
+  let m: RegExpExecArray | null;
+  while ((m = itemRe.exec(xml))) {
+    const block = m[1];
+    const pick = (re: RegExp): string => {
+      const r = block.match(re);
+      return r ? r[1].trim() : '';
+    };
+    const title = decodeEntities(pick(fields.title));
+    const link = decodeEntities(pick(fields.link));
+    const pubDate = pick(fields.pubDate);
+    const description = decodeEntities(pick(fields.description));
+    if (!title || !link) continue;
+    items.push({
+      id: hashString(link),
+      title: title.slice(0, 200),
+      source,
+      url: link,
+      published_at: parseRssDate(pubDate),
+      summary: stripHtml(description).slice(0, 240) || null,
+      category: defaultCategory,
+      fetched_at: new Date().toISOString(),
+    });
+  }
+  return items;
+}
+
+async function fetchFeed(feed: FeedSource): Promise<NewsRow[]> {
+  try {
+    const resp = await fetch(feed.url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (compatible; PFWA/1.0)',
+        Accept: 'application/rss+xml, application/xml, text/xml, */*',
+      },
+    });
+    if (!resp.ok) {
+      console.error(`news-feed: ${feed.source} returned ${resp.status}`);
+      return [];
+    }
+    const xml = await resp.text();
+    return parseRss(xml, feed.source, feed.category);
+  } catch (e) {
+    console.error(`news-feed: ${feed.source} fetch failed`, e);
+    return [];
+  }
+}
+
+function fallbackFor() {
+  const now = Date.now();
+  return FALLBACK_NEWS.map((n, i) => ({
     id: n.id,
     title: n.title,
     source: n.source,
     url: n.url,
-    publishedAt: new Date(now.getTime() - i * 1000 * 60 * 30).toISOString(),
+    publishedAt: new Date(now - i * 1000 * 60 * 30).toISOString(),
     summary: n.summary,
     category: n.category,
   }));
@@ -287,69 +267,45 @@ Deno.serve(async (req: Request) => {
   if (pre) return pre;
 
   try {
-    const url = new URL(req.url);
-    const category = url.searchParams.get('category') ?? 'all';
-
     // 1. Fresh DB cache.
-    const cached = await readCache(category);
+    const cached = await readCache();
     if (cached && freshEnough(cached)) {
       return json(cached.map(rowToArticle), {
         headers: { ...corsHeaders, 'x-cache': 'HIT' },
       });
     }
 
-    // 2. Try to refresh from Google News (with proxy fallback).
-    let freshRows: NewsRow[] = [];
-    const queriesToFetch =
-      category === 'all' || !QUERIES[category]
-        ? Object.values(QUERIES)
-        : [QUERIES[category]];
+    // 2. Direct RSS from Italian outlets.
+    const results = await Promise.all(FEEDS.map(fetchFeed));
+    const allItems = results.flat();
+    const seen = new Set<string>();
+    const freshRows = allItems
+      .filter((it) => {
+        if (!it.url || seen.has(it.url)) return false;
+        seen.add(it.url);
+        return true;
+      })
+      .sort((a, b) => (a.published_at < b.published_at ? 1 : -1))
+      .slice(0, 30);
 
-    try {
-      const all = (await Promise.all(queriesToFetch.map(fetchRss))).flat();
-      const seen = new Set<string>();
-      freshRows = all
-        .map((a) => ({
-          id: hashString(a.link),
-          title: a.title,
-          source: a.source || 'Google News',
-          url: a.link,
-          published_at: a.pubDate ? new Date(a.pubDate).toISOString() : new Date().toISOString(),
-          summary: stripHtml(a.description ?? '').slice(0, 240),
-          category,
-          fetched_at: new Date().toISOString(),
-        }))
-        .filter((a) => {
-          if (!a.url || !a.title) return false;
-          if (seen.has(a.url)) return false;
-          seen.add(a.url);
-          return true;
-        })
-        .sort((a, b) => (a.published_at < b.published_at ? 1 : -1))
-        .slice(0, 30);
-
-      if (freshRows.length > 0) {
-        writeCache(category, freshRows).catch((e) =>
-          console.error('news-feed cache write failed', e),
-        );
-      }
-    } catch (fetchErr) {
-      console.error('news-feed google fetch failed', fetchErr);
-    }
-
-    // 3. Serve in priority order: fresh > cached > hardcoded fallback.
     if (freshRows.length > 0) {
+      writeCache(freshRows).catch((e) =>
+        console.error('news-feed cache write failed', e),
+      );
       return json(freshRows.map(rowToArticle), {
         headers: { ...corsHeaders, 'x-cache': 'MISS' },
       });
     }
+
+    // 3. Stale cache.
     if (cached && cached.length > 0) {
       return json(cached.map(rowToArticle), {
         headers: { ...corsHeaders, 'x-cache': 'STALE' },
       });
     }
-    const fb = fallbackFor(category);
-    return json(fb, {
+
+    // 4. Hardcoded fallback.
+    return json(fallbackFor(), {
       headers: { ...corsHeaders, 'x-cache': 'FALLBACK' },
     });
   } catch (err) {
