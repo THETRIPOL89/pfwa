@@ -7,9 +7,11 @@ import type { Investment, MarketQuote } from '@/types/domain';
 export function HoldingCard({
   holding,
   quote,
+  onClick,
 }: {
   holding: Investment;
   quote?: MarketQuote;
+  onClick?: () => void;
 }) {
   const currentPrice = quote?.priceCents ?? holding.avgCostCents;
   const marketValue = currentPrice * holding.quantity;
@@ -19,7 +21,10 @@ export function HoldingCard({
   const positive = gain >= 0;
 
   return (
-    <Card className="p-5">
+    <Card
+      className={cn('p-5', onClick && 'cursor-pointer transition-transform hover:-translate-y-0.5')}
+      onClick={onClick}
+    >
       <div className="flex items-start justify-between">
         <div>
           <h3 className="text-sm font-semibold">{holding.symbol}</h3>

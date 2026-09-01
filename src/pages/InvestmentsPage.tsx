@@ -1,20 +1,51 @@
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
+import { Plus } from 'lucide-react';
+import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { ChartWrapper } from '@/components/charts/ChartWrapper';
 import { AllocationPie } from '@/components/charts/AllocationPie';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Badge } from '@/components/ui/badge';
-import { useDividends, useInvestments } from '@/hooks/useInvestments';
+import {
+  useDividends,
+  useInvestments,
+  useCreateInvestment,
+  useUpdateInvestment,
+  useDeleteInvestment,
+} from '@/hooks/useInvestments';
 import { useMarketQuotes } from '@/hooks/useMarketQuotes';
 import { useAccounts } from '@/hooks/useAccounts';
 import { HoldingCard } from '@/components/investments/HoldingCard';
+import { InvestmentFormDialog } from '@/components/investments/InvestmentFormDialog';
 import { formatCurrency, formatDate } from '@/lib/utils';
+import { toast } from '@/components/ui/toast';
+import type { InvestmentInput } from '@/types/domain';
 
 export function InvestmentsPage() {
   const investments = useInvestments();
   const dividends = useDividends();
   const accounts = useAccounts();
+  const create = useCreateInvestment();
+  const update = useUpdateInvestment();
+  const remove = useDeleteInvestment();
   const { data: quotes, isLoading: quotesLoading } = useMarketQuotes();
+  const [dialogOpen, setDialogOpen] = useState(false);
+  const [editing, setEditing] = useState<InvestmentInput | undefined>();
+
+  const handleSubmit = async (input: InvestmentInput) => {
+    if (input.id) {
+      await update.mutateAsync({ id: input.id, patch: input });
+      toast.success('Investimento aggiornato');
+    } else {
+      await create.mutateAsync(input);
+      toast.success('Investimento aggiunto');
+    }
+  };
+
+  const handleDelete = async (id: string) => {
+    await remove.mutateAsync(id);
+    toast.success('Investimento rimosso');
+  };
 
   const quoteBySymbol = useMemo(() => {
     const map = new Map(quotes.map((q) => [q.symbol.toUpperCase(), q]));
@@ -74,11 +105,21 @@ export function InvestmentsPage() {
 
   return (
     <div className="space-y-6">
-      <header>
-        <h1 className="text-2xl font-bold tracking-tight">Investimenti</h1>
-        <p className="mt-1 text-sm text-muted-foreground">
-          Portafoglio · {investments.data?.length ?? 0} posizioni
-        </p>
+      <header className="flex flex-col justify-between gap-3 sm:flex-row sm:items-end">
+        <div>
+          <h1 className="text-2xl font-bold tracking-tight">Investimenti</h1>
+          <p className="mt-1 text-sm text-muted-foreground">
+            Portafoglio · {investments.data?.length ?? 0} posizioni
+          </p>
+        </div>
+        <Button
+          onClick={() => {
+            setEditing(undefined);
+            setDialogOpen(true);
+          }}
+        >
+          <Plus className="size-4" /> Nuovo investimento
+        </Button>
       </header>
 
       <section className="grid gap-4 lg:grid-cols-3">
@@ -161,6 +202,10 @@ export function InvestmentsPage() {
                   key={h.id}
                   holding={h}
                   quote={quoteBySymbol.get(h.symbol.toUpperCase())}
+                  onClick={() => {
+                    setEditing({ ...h });
+                    setDialogOpen(true);
+                  }}
                 />
               ))}
             </div>
@@ -208,6 +253,15 @@ export function InvestmentsPage() {
         <code className="font-mono">/api/crypto</code>. In modalità mock i valori
         sono sintetici ma seguono la stessa firma API della produzione.
       </p>
+
+      <InvestmentFormDialog
+        open={dialogOpen}
+        onOpenChange={setDialogOpen}
+        initial={editing as any}
+        accounts={accounts.data ?? []}
+        onSubmit={handleSubmit}
+        onDelete={handleDelete}
+      />
     </div>
   );
 }

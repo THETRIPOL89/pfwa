@@ -117,13 +117,19 @@ export async function updateAccount(
   if (patch.institution !== undefined) update.institution = patch.institution;
   if (patch.archived !== undefined) update.archived = patch.archived;
 
-  const { data, error } = await supabase
-    .from('accounts')
-    .update(update)
-    .eq('id', id)
-    .select('*')
-    .single();
+  // Step 1: update without select — avoids .single() failures when RLS
+  // blocks the post-update select for any reason.
+  const { error } = await supabase.from('accounts').update(update).eq('id', id);
   if (error) throw error;
+
+  // Step 2: read the row back with maybeSingle() so we tolerate RLS.
+  const { data, error: readError } = await supabase
+    .from('accounts')
+    .select('*')
+    .eq('id', id)
+    .maybeSingle();
+  if (readError) throw readError;
+  if (!data) throw new Error('Account not found after update');
   return rowToAccount(data);
 }
 
