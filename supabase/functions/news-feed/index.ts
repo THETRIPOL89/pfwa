@@ -35,10 +35,26 @@ interface RawArticle {
 }
 
 async function fetchRss(query: string): Promise<RawArticle[]> {
-  const url = `https://news.google.com/rss/search?q=${encodeURIComponent(query)}&hl=it&gl=IT&ceid=IT:it`;
-  const resp = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0 PFWA/1.0' } });
-  if (!resp.ok) throw new Error(`Google News returned ${resp.status}`);
-  const xml = await resp.text();
+  // Google News blocks the Supabase Edge Function IP with 503. We go
+  // through allorigins.win — a free CORS-friendly proxy — which fetches
+  // from a different egress pool. Falls back to the direct URL if the
+  // proxy is down.
+  const rssUrl = `https://news.google.com/rss/search?q=${encodeURIComponent(query)}&hl=it&gl=IT&ceid=IT:it`;
+  const proxyUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(rssUrl)}`;
+  let xml = '';
+  for (const target of [proxyUrl, rssUrl]) {
+    try {
+      const resp = await fetch(target, {
+        headers: { 'User-Agent': 'Mozilla/5.0 PFWA/1.0' },
+      });
+      if (!resp.ok) throw new Error(`fetch returned ${resp.status}`);
+      xml = await resp.text();
+      if (xml.includes('<item>')) break;
+    } catch (e) {
+      console.error('news-feed proxy attempt failed', target, e);
+    }
+  }
+  if (!xml.includes('<item>')) throw new Error('All fetch attempts failed');
   const items: RawArticle[] = [];
   const itemRe = /<item>([\s\S]*?)<\/item>/g;
   const fields = {
