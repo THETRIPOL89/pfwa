@@ -1,4 +1,5 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
+import { Loader2, RefreshCw } from 'lucide-react';
 import {
   Dialog,
   DialogContent,
@@ -9,6 +10,7 @@ import { Button } from '@/components/ui/button';
 import { Input, Label } from '@/components/ui/input';
 import { Select } from '@/components/ui/select';
 import { toast } from '@/components/ui/toast';
+import { fetchLiveQuote } from '@/services/liveQuote';
 import type {
   Account,
   AssetClass,
@@ -59,6 +61,9 @@ export function InvestmentFormDialog({
   );
   const [currency, setCurrency] = useState<Currency>(initial?.currency ?? 'EUR');
   const [submitting, setSubmitting] = useState(false);
+  const [quoteLoading, setQuoteLoading] = useState(false);
+  const [quoteSource, setQuoteSource] = useState<string | null>(null);
+  const quoteRequestId = useRef(0);
 
   useEffect(() => {
     if (open) {
@@ -69,8 +74,60 @@ export function InvestmentFormDialog({
       setQuantity(initial?.quantity.toString() ?? '');
       setAvgCost(initial ? (initial.avgCostCents / 100).toString() : '');
       setCurrency(initial?.currency ?? 'EUR');
+      setQuoteSource(null);
     }
   }, [open, initial, accounts]);
+
+  // Auto-fetch quote when symbol or assetClass change (debounced), unless
+  // we're editing an existing investment (user keeps their avg cost).
+  useEffect(() => {
+    if (initial) return;
+    if (!open) return;
+    const trimmed = symbol.trim();
+    if (!trimmed) {
+      setQuoteSource(null);
+      return;
+    }
+    const requestId = ++quoteRequestId.current;
+    const timer = setTimeout(async () => {
+      setQuoteLoading(true);
+      try {
+        const quote = await fetchLiveQuote(trimmed, assetClass);
+        if (requestId !== quoteRequestId.current) return;
+        setAvgCost((quote.priceCents / 100).toString());
+        setCurrency(quote.currency);
+        setQuoteSource(quote.source);
+      } catch (e) {
+        if (requestId !== quoteRequestId.current) return;
+        setQuoteSource(null);
+        // Silently ignore — user can type the price manually.
+        console.error('quote fetch failed', e);
+      } finally {
+        if (requestId === quoteRequestId.current) setQuoteLoading(false);
+      }
+    }, 600);
+    return () => clearTimeout(timer);
+  }, [symbol, assetClass, open, initial]);
+
+  const handleManualRefresh = async () => {
+    const trimmed = symbol.trim();
+    if (!trimmed) {
+      toast.error('Inserisci prima il simbolo');
+      return;
+    }
+    setQuoteLoading(true);
+    try {
+      const quote = await fetchLiveQuote(trimmed, assetClass);
+      setAvgCost((quote.priceCents / 100).toString());
+      setCurrency(quote.currency);
+      setQuoteSource(quote.source);
+      toast.success(`Prezzo aggiornato da ${quote.source}`);
+    } catch (e) {
+      toast.error(`Quote non disponibile: ${e instanceof Error ? e.message : 'errore'}`);
+    } finally {
+      setQuoteLoading(false);
+    }
+  };
 
   const handleSubmit = async () => {
     const qty = Number(quantity.replace(',', '.'));
@@ -161,14 +218,38 @@ export function InvestmentFormDialog({
             </div>
             <div className="space-y-1.5">
               <Label htmlFor="inv-cost">Prezzo medio</Label>
-              <Input
-                id="inv-cost"
-                type="number"
-                step="0.01"
-                placeholder="0,00"
-                value={avgCost}
-                onChange={(e) => setAvgCost(e.target.value)}
-              />
+              <div className="flex gap-1">
+                <Input
+                  id="inv-cost"
+                  type="number"
+                  step="0.01"
+                  placeholder="0,00"
+                  value={avgCost}
+                  onChange={(e) => setAvgCost(e.target.value)}
+                />
+                {!initial && (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="icon"
+                    onClick={handleManualRefresh}
+                    disabled={quoteLoading}
+                    aria-label="Aggiorna prezzo"
+                    title="Aggiorna prezzo"
+                  >
+                    {quoteLoading ? (
+                      <Loader2 className="size-4 animate-spin" />
+                    ) : (
+                      <RefreshCw className="size-4" />
+                    )}
+                  </Button>
+                )}
+              </div>
+              {quoteSource && (
+                <p className="text-[11px] text-muted-foreground">
+                  Prezzo auto da {quoteSource}
+                </p>
+              )}
             </div>
             <div className="space-y-1.5">
               <Label>Valuta</Label>

@@ -1,82 +1,68 @@
 /**
- * News service. Fetches Google News RSS via api.rss2json.com — a free
- * CORS-enabled proxy — directly from the browser, then upserts results
- * into the Supabase `news_cache` table so subsequent loads are instant.
+ * News service. Fetches Italian financial news via the NewsData.io REST API
+ * directly from the browser, then upserts results into the Supabase
+ * `news_cache` table so subsequent loads are instant.
  *
  * Why no Edge Function? Supabase Edge Runtime blocks egress to almost
- * every external host (Google, Sole24Ore CDN, RSS aggregators). Browser
- * fetches have no such restriction.
+ * every external host. Browser fetches have no such restriction.
  */
 import { supabase } from '@/lib/supabase';
 import { USE_MOCKS } from '@/lib/supabase';
 import { db, networkDelay } from './_db';
 import type { NewsArticle } from '@/types/domain';
 
-const FEEDS: { id: string; url: string; category: string }[] = [
-  {
-    id: 'mercati',
-    url: 'https://news.google.com/rss/search?q=mercati+azionari+italia&hl=it&gl=IT&ceid=IT:it',
-    category: 'mercati',
-  },
-  {
-    id: 'crypto',
-    url: 'https://news.google.com/rss/search?q=criptovalute+bitcoin&hl=it&gl=IT&ceid=IT:it',
-    category: 'crypto',
-  },
-  {
-    id: 'economia',
-    url: 'https://news.google.com/rss/search?q=economia+italia&hl=it&gl=IT&ceid=IT:it',
-    category: 'economia',
-  },
-  {
-    id: 'aziende',
-    url: 'https://news.google.com/rss/search?q=aziende+italiane+piazza+affari&hl=it&gl=IT&ceid=IT:it',
-    category: 'aziende',
-  },
-  {
-    id: 'personale',
-    url: 'https://news.google.com/rss/search?q=finanza+personale+risparmio&hl=it&gl=IT&ceid=IT:it',
-    category: 'personale',
-  },
-];
+const NEWSDATA_API_KEY = import.meta.env.VITE_NEWSDATA_API_KEY as string | undefined;
+const NEWSDATA_BASE = 'https://newsdata.io/api/1/news';
 
-interface Rss2JsonResponse {
+interface NewsDataResponse {
   status: string;
-  items?: {
+  totalResults?: number;
+  results?: {
+    article_id: string;
     title: string;
     link: string;
     pubDate: string;
-    source?: string;
+    source_id?: string;
     description?: string;
-    enclosure?: { link?: string };
+    content?: string;
+    category?: string[];
+    keywords?: string[];
   }[];
   message?: string;
 }
 
-function hashString(s: string): string {
-  let h = 0;
-  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0;
-  return `n-${h.toString(36)}`;
+interface FeedSpec {
+  query: string;
+  category: NonNullable<NewsArticle['category']>;
 }
+
+const FEEDS: FeedSpec[] = [
+  { query: 'mercati azionari Italia', category: 'mercati' },
+  { query: 'criptovalute bitcoin', category: 'crypto' },
+  { query: 'economia Italia', category: 'economia' },
+  { query: 'aziende italiane Piazza Affari', category: 'aziende' },
+  { query: 'finanza personale risparmio', category: 'personale' },
+];
 
 function stripHtml(s: string): string {
   return s.replace(/<[^>]+>/g, '').replace(/&[a-z]+;/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
-async function fetchRss2Json(feed: typeof FEEDS[number]): Promise<NewsArticle[]> {
-  const url = `https://api.rss2json.com/v1/api.json?rss_url=${encodeURIComponent(feed.url)}&count=20`;
+async function fetchNewsData(spec: FeedSpec): Promise<NewsArticle[]> {
+  if (!NEWSDATA_API_KEY) throw new Error('VITE_NEWSDATA_API_KEY not set');
+  const url = `${NEWSDATA_BASE}?apikey=${NEWSDATA_API_KEY}&q=${encodeURIComponent(spec.query)}&language=it&category=business,top&size=10`;
   const resp = await fetch(url);
-  if (!resp.ok) throw new Error(`rss2json returned ${resp.status}`);
-  const json = (await resp.json()) as Rss2JsonResponse;
-  if (json.status !== 'ok' || !json.items) return [];
-  return json.items.map((it) => ({
-    id: hashString(it.link),
+  if (!resp.ok) throw new Error(`NewsData returned ${resp.status}`);
+  const json = (await resp.json()) as NewsDataResponse;
+  if (json.status !== 'success' || !json.results) return [];
+  return json.results.map((it) => ({
+    id: it.article_id,
     title: stripHtml(it.title).slice(0, 200),
-    source: it.source || 'Google News',
+    source: it.source_id ?? 'NewsData',
     url: it.link,
     publishedAt: new Date(it.pubDate).toISOString(),
-    summary: stripHtml(it.description ?? '').slice(0, 240),
-    category: feed.category as NewsArticle['category'],
+    summary: stripHtml(it.description ?? it.content ?? '').slice(0, 240),
+    category: spec.category,
   }));
 }
 
@@ -91,7 +77,6 @@ async function persistToCache(articles: NewsArticle[]): Promise<void> {
     summary: a.summary ?? null,
     category: a.category ?? null,
   }));
-  // Upsert by url so re-fetches overwrite stale entries.
   const { error } = await supabase
     .from('news_cache')
     .upsert(rows, { onConflict: 'url' });
@@ -132,7 +117,6 @@ export async function listNews(opts?: { category?: NewsArticle['category'] }): P
   // Always read what's already in the DB cache first.
   const cached = await readCache();
   if (cached) {
-    // Trigger a background refresh to keep the cache warm.
     refreshInBackground().catch((e) => console.error('news background refresh failed', e));
     if (opts?.category) {
       return cached.filter((n) => n.category === opts.category);
@@ -140,11 +124,10 @@ export async function listNews(opts?: { category?: NewsArticle['category'] }): P
     return cached;
   }
 
-  // Cold start: fetch live RSS synchronously so the page renders immediately.
-  const allFeeds = opts?.category ? FEEDS.filter((f) => f.category === opts.category) : FEEDS;
-  const results = await Promise.all(allFeeds.map(fetchRss2Json));
+  // Cold start: fetch live synchronously so the page renders immediately.
+  const feeds = opts?.category ? FEEDS.filter((f) => f.category === opts.category) : FEEDS;
+  const results = await Promise.all(feeds.map(fetchNewsData));
   const articles = results.flat();
-  // Deduplicate by URL.
   const seen = new Set<string>();
   const deduped = articles.filter((a) => {
     if (seen.has(a.url)) return false;
@@ -152,7 +135,6 @@ export async function listNews(opts?: { category?: NewsArticle['category'] }): P
     return true;
   });
   deduped.sort((a, b) => (a.publishedAt < b.publishedAt ? 1 : -1));
-  // Persist so next load is instant.
   persistToCache(deduped).catch((e) => console.error('news initial persist failed', e));
   return opts?.category ? deduped.filter((a) => a.category === opts.category) : deduped;
 }
@@ -162,7 +144,7 @@ async function refreshInBackground(): Promise<void> {
   if (backgroundRefreshInFlight) return;
   backgroundRefreshInFlight = true;
   try {
-    const results = await Promise.all(FEEDS.map(fetchRss2Json));
+    const results = await Promise.all(FEEDS.map(fetchNewsData));
     const articles = results.flat();
     const seen = new Set<string>();
     const deduped = articles.filter((a) => {
