@@ -11,6 +11,7 @@ import {
   type ListTransactionsArgs,
   type PaginatedTransactions,
 } from '@/services/transactions';
+import { toast } from '@/components/ui/toast';
 import type { Transaction, TransactionInput } from '@/types/domain';
 
 export const transactionKeys = {
@@ -30,6 +31,7 @@ export function useCreateTransaction() {
   return useMutation({
     mutationFn: (input: TransactionInput) => createTransaction(input),
     onSuccess: () => qc.invalidateQueries({ queryKey: transactionKeys.all }),
+    onError: (err) => toast.error(`Salvataggio fallito: ${err.message}`),
   });
 }
 
@@ -39,6 +41,7 @@ export function useUpdateTransaction() {
     mutationFn: ({ id, patch }: { id: string; patch: Partial<TransactionInput> }) =>
       updateTransaction(id, patch),
     onSuccess: () => qc.invalidateQueries({ queryKey: transactionKeys.all }),
+    onError: (err) => toast.error(`Aggiornamento fallito: ${err.message}`),
   });
 }
 
@@ -61,13 +64,14 @@ export function useDeleteTransaction() {
       });
       return { previous };
     },
-    onError: (_err, _id, ctx) => {
+    onError: (err, _id, ctx) => {
       // Roll back optimistic update.
       const previous = (ctx as { previous?: ReadonlyArray<readonly [readonly unknown[], unknown]> } | undefined)
         ?.previous;
       previous?.forEach(([key, data]) => {
         qc.setQueryData(key as readonly unknown[], data);
       });
+      toast.error(`Eliminazione fallita: ${err.message}`);
     },
     onSettled: () => qc.invalidateQueries({ queryKey: transactionKeys.all }),
   });

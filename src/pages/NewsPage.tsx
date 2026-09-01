@@ -45,6 +45,17 @@ export function NewsPage() {
             <Skeleton key={i} className="h-36 w-full" />
           ))}
         </div>
+      ) : news.isError ? (
+        <Card>
+          <CardHeader>
+            <CardTitle>Notizie non disponibili</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <p className="text-sm text-muted-foreground">
+              Impossibile contattare il servizio notizie. Riprova tra qualche minuto.
+            </p>
+          </CardContent>
+        </Card>
       ) : !news.data || news.data.length === 0 ? (
         <Card>
           <CardHeader>

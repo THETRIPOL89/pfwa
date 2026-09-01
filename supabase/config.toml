@@ -411,3 +411,10 @@ enabled = true
 # declarative_schema_path = "./schemas"
 # JSON string passed through to pg-delta SQL formatting.
 # format_options = "{\"keywordCase\":\"upper\",\"indent\":2,\"maxWidth\":80,\"commaStyle\":\"trailing\"}"
+
+# ─── Edge Functions ────────────────────────────────────────────────────────────
+# `news-feed` serves public Google News RSS data — no user context, so JWT
+# verification is unnecessary and would block anonymous browser fetches.
+
+[functions.news-feed]
+verify_jwt = false

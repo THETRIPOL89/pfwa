@@ -5,7 +5,6 @@ import { BottomNav } from './BottomNav';
 import { useEffect } from 'react';
 import { useDarkMode } from '@/hooks/useDarkMode';
 import { useSyncStore } from '@/stores/useSyncStore';
-import { Toaster } from '@/components/ui/toast';
 
 /**
  * Top-level layout: sidebar (desktop), top bar, content, bottom nav
@@ -43,12 +42,6 @@ export function AppShell() {
         </main>
         <BottomNav />
       </div>
-      <Toaster
-        position="top-right"
-        richColors
-        closeButton
-        toastOptions={{ duration: 4000 }}
-      />
     </div>
   );
 }

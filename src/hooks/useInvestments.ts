@@ -10,6 +10,7 @@ import {
   listInvestments,
   updateInvestment,
 } from '@/services/investments';
+import { toast } from '@/components/ui/toast';
 import type { Dividend, Investment, InvestmentInput } from '@/types/domain';
 
 export const investmentKeys = {
@@ -37,6 +38,7 @@ export function useCreateInvestment() {
   return useMutation({
     mutationFn: (input: InvestmentInput) => createInvestment(input),
     onSuccess: () => qc.invalidateQueries({ queryKey: investmentKeys.all }),
+    onError: (err) => toast.error(`Salvataggio fallito: ${err.message}`),
   });
 }
 
@@ -46,6 +48,7 @@ export function useUpdateInvestment() {
     mutationFn: ({ id, patch }: { id: string; patch: Partial<InvestmentInput> }) =>
       updateInvestment(id, patch),
     onSuccess: () => qc.invalidateQueries({ queryKey: investmentKeys.all }),
+    onError: (err) => toast.error(`Aggiornamento fallito: ${err.message}`),
   });
 }
 
@@ -54,5 +57,6 @@ export function useDeleteInvestment() {
   return useMutation({
     mutationFn: deleteInvestment,
     onSuccess: () => qc.invalidateQueries({ queryKey: investmentKeys.all }),
+    onError: (err) => toast.error(`Eliminazione fallita: ${err.message}`),
   });
 }

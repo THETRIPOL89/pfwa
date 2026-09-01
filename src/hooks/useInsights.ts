@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { listInsights, refreshInsights } from '@/services/insights';
+import { toast } from '@/components/ui/toast';
 import type { Insight } from '@/types/domain';
 
 export const insightKeys = {
@@ -20,5 +21,6 @@ export function useRefreshInsights() {
   return useMutation({
     mutationFn: refreshInsights,
     onSuccess: (data) => qc.setQueryData(insightKeys.list(), data),
+    onError: (err) => toast.error(`Aggiornamento fallito: ${err.message}`),
   });
 }

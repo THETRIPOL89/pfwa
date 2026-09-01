@@ -11,6 +11,7 @@ import {
   listAccounts,
   updateAccount,
 } from '@/services/accounts';
+import { toast } from '@/components/ui/toast';
 import type { Account, AccountInput } from '@/types/domain';
 
 export const accountKeys = {
@@ -45,6 +46,11 @@ export function useCreateAccount(opts?: UseMutationOptions<Account, Error, Accou
       (opts?.onSuccess as ((d: Account, v: AccountInput) => void) | undefined)?.(data, vars);
       void ctx;
     },
+    onError: (err, vars, ctx) => {
+      toast.error(`Salvataggio fallito: ${err.message}`);
+      (opts?.onError as ((e: Error, v: AccountInput) => void) | undefined)?.(err, vars);
+      void ctx;
+    },
   });
 }
 
@@ -57,6 +63,7 @@ export function useUpdateAccount() {
       qc.invalidateQueries({ queryKey: accountKeys.all });
       qc.setQueryData(accountKeys.detail(data.id), data);
     },
+    onError: (err) => toast.error(`Aggiornamento fallito: ${err.message}`),
   });
 }
 
@@ -65,5 +72,6 @@ export function useDeleteAccount() {
   return useMutation({
     mutationFn: deleteAccount,
     onSuccess: () => qc.invalidateQueries({ queryKey: accountKeys.all }),
+    onError: (err) => toast.error(`Eliminazione fallita: ${err.message}`),
   });
 }

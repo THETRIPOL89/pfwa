@@ -9,6 +9,7 @@ import {
   listBudgets,
   updateBudget,
 } from '@/services/budgets';
+import { toast } from '@/components/ui/toast';
 import type { Budget, BudgetInput } from '@/types/domain';
 
 export const budgetKeys = {
@@ -27,6 +28,7 @@ export function useCreateBudget() {
   return useMutation({
     mutationFn: (input: BudgetInput) => createBudget(input),
     onSuccess: () => qc.invalidateQueries({ queryKey: budgetKeys.all }),
+    onError: (err) => toast.error(`Salvataggio fallito: ${err.message}`),
   });
 }
 
@@ -36,6 +38,7 @@ export function useUpdateBudget() {
     mutationFn: ({ id, patch }: { id: string; patch: Partial<BudgetInput> }) =>
       updateBudget(id, patch),
     onSuccess: () => qc.invalidateQueries({ queryKey: budgetKeys.all }),
+    onError: (err) => toast.error(`Aggiornamento fallito: ${err.message}`),
   });
 }
 
@@ -44,5 +47,6 @@ export function useDeleteBudget() {
   return useMutation({
     mutationFn: deleteBudget,
     onSuccess: () => qc.invalidateQueries({ queryKey: budgetKeys.all }),
+    onError: (err) => toast.error(`Eliminazione fallita: ${err.message}`),
   });
 }
