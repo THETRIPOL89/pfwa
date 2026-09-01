@@ -1,35 +1,24 @@
 /**
- * News service. Fetches Italian financial news via the NewsData.io REST API
- * directly from the browser, then upserts results into the Supabase
- * `news_cache` table so subsequent loads are instant.
+ * News service. Fetches Italian financial news from rss2json.com (a free
+ * CORS-enabled proxy that parses Google News RSS) directly from the
+ * browser, then upserts results into the Supabase `news_cache` table so
+ * subsequent loads are instant.
  *
- * Why no Edge Function? Supabase Edge Runtime blocks egress to almost
- * every external host. Browser fetches have no such restriction.
+ * Strategy:
+ *   1. Always read from DB cache first.
+ *   2. If cache is empty OR stale (>15min old), fetch live RSS via rss2json.
+ *   3. Persist live results to cache (so next load is instant).
+ *   4. Background refresh fires after every cache hit to keep data fresh.
+ *
+ * No hardcoded fallback — if both cache and live fetch fail, the page
+ * shows an empty state with no fake data, by design.
  */
 import { supabase } from '@/lib/supabase';
 import { USE_MOCKS } from '@/lib/supabase';
 import { db, networkDelay } from './_db';
 import type { NewsArticle } from '@/types/domain';
 
-const NEWSDATA_API_KEY = import.meta.env.VITE_NEWSDATA_API_KEY as string | undefined;
-const NEWSDATA_BASE = 'https://newsdata.io/api/1/news';
-
-interface NewsDataResponse {
-  status: string;
-  totalResults?: number;
-  results?: {
-    article_id: string;
-    title: string;
-    link: string;
-    pubDate: string;
-    source_id?: string;
-    description?: string;
-    content?: string;
-    category?: string[];
-    keywords?: string[];
-  }[];
-  message?: string;
-}
+const CACHE_TTL_MS = 1000 * 60 * 15;
 
 interface FeedSpec {
   query: string;
@@ -37,31 +26,60 @@ interface FeedSpec {
 }
 
 const FEEDS: FeedSpec[] = [
-  { query: 'mercati azionari Italia', category: 'mercati' },
-  { query: 'criptovalute bitcoin', category: 'crypto' },
-  { query: 'economia Italia', category: 'economia' },
-  { query: 'aziende italiane Piazza Affari', category: 'aziende' },
-  { query: 'finanza personale risparmio', category: 'personale' },
+  { query: 'mercati+azionari+italia', category: 'mercati' },
+  { query: 'criptovalute+bitcoin', category: 'crypto' },
+  { query: 'economia+italia', category: 'economia' },
+  { query: 'aziende+italiane+piazza+affari', category: 'aziende' },
+  { query: 'finanza+personale+risparmio', category: 'personale' },
 ];
+
+interface Rss2JsonResponse {
+  status: string;
+  items?: {
+    title: string;
+    link: string;
+    pubDate: string;
+    source?: string;
+    description?: string;
+  }[];
+  message?: string;
+}
 
 function stripHtml(s: string): string {
   return s.replace(/<[^>]+>/g, '').replace(/&[a-z]+;/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
-async function fetchNewsData(spec: FeedSpec): Promise<NewsArticle[]> {
-  if (!NEWSDATA_API_KEY) throw new Error('VITE_NEWSDATA_API_KEY not set');
-  const url = `${NEWSDATA_BASE}?apikey=${NEWSDATA_API_KEY}&q=${encodeURIComponent(spec.query)}&language=it&category=business,top&size=10`;
+function decodeEntities(s: string): string {
+  return s
+    .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&apos;/g, "'");
+}
+
+function hashString(s: string): string {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0;
+  return `n-${h.toString(36)}`;
+}
+
+async function fetchRss2Json(spec: FeedSpec): Promise<NewsArticle[]> {
+  const rssUrl = `https://news.google.com/rss/search?q=${spec.query}&hl=it&gl=IT&ceid=IT:it`;
+  const url = `https://api.rss2json.com/v1/api.json?rss_url=${encodeURIComponent(rssUrl)}&count=15`;
   const resp = await fetch(url);
-  if (!resp.ok) throw new Error(`NewsData returned ${resp.status}`);
-  const json = (await resp.json()) as NewsDataResponse;
-  if (json.status !== 'success' || !json.results) return [];
-  return json.results.map((it) => ({
-    id: it.article_id,
-    title: stripHtml(it.title).slice(0, 200),
-    source: it.source_id ?? 'NewsData',
+  if (!resp.ok) throw new Error(`rss2json returned ${resp.status}`);
+  const json = (await resp.json()) as Rss2JsonResponse;
+  if (json.status !== 'ok' || !json.items) return [];
+  return json.items.map((it) => ({
+    id: hashString(it.link),
+    title: stripHtml(decodeEntities(it.title)).slice(0, 200),
+    source: it.source || 'Google News',
     url: it.link,
     publishedAt: new Date(it.pubDate).toISOString(),
-    summary: stripHtml(it.description ?? it.content ?? '').slice(0, 240),
+    summary: stripHtml(decodeEntities(it.description ?? '')).slice(0, 240),
     category: spec.category,
   }));
 }
@@ -105,6 +123,33 @@ async function readCache(): Promise<NewsArticle[] | null> {
   }));
 }
 
+async function fetchAndCache(feeds: FeedSpec[]): Promise<NewsArticle[]> {
+  const results = await Promise.all(feeds.map(fetchRss2Json));
+  const articles = results.flat();
+  const seen = new Set<string>();
+  const deduped = articles.filter((a) => {
+    if (seen.has(a.url)) return false;
+    seen.add(a.url);
+    return true;
+  });
+  deduped.sort((a, b) => (a.publishedAt < b.publishedAt ? 1 : -1));
+  await persistToCache(deduped);
+  return deduped;
+}
+
+let backgroundRefreshInFlight = false;
+async function refreshInBackground(): Promise<void> {
+  if (backgroundRefreshInFlight) return;
+  backgroundRefreshInFlight = true;
+  try {
+    await fetchAndCache(FEEDS);
+  } catch (e) {
+    console.error('news background refresh failed', e);
+  } finally {
+    backgroundRefreshInFlight = false;
+  }
+}
+
 export async function listNews(opts?: { category?: NewsArticle['category'] }): Promise<NewsArticle[]> {
   if (USE_MOCKS) {
     await networkDelay(180);
@@ -114,47 +159,21 @@ export async function listNews(opts?: { category?: NewsArticle['category'] }): P
     return rows;
   }
 
-  // Always read what's already in the DB cache first.
   const cached = await readCache();
-  if (cached) {
-    refreshInBackground().catch((e) => console.error('news background refresh failed', e));
-    if (opts?.category) {
-      return cached.filter((n) => n.category === opts.category);
-    }
-    return cached;
+  const feeds = opts?.category ? FEEDS.filter((f) => f.category === opts.category) : FEEDS;
+
+  if (cached && cached.length > 0) {
+    // Kick off background refresh to keep cache warm.
+    refreshInBackground();
+    return opts?.category ? cached.filter((n) => n.category === opts.category) : cached;
   }
 
-  // Cold start: fetch live synchronously so the page renders immediately.
-  const feeds = opts?.category ? FEEDS.filter((f) => f.category === opts.category) : FEEDS;
-  const results = await Promise.all(feeds.map(fetchNewsData));
-  const articles = results.flat();
-  const seen = new Set<string>();
-  const deduped = articles.filter((a) => {
-    if (seen.has(a.url)) return false;
-    seen.add(a.url);
-    return true;
-  });
-  deduped.sort((a, b) => (a.publishedAt < b.publishedAt ? 1 : -1));
-  persistToCache(deduped).catch((e) => console.error('news initial persist failed', e));
-  return opts?.category ? deduped.filter((a) => a.category === opts.category) : deduped;
-}
-
-let backgroundRefreshInFlight = false;
-async function refreshInBackground(): Promise<void> {
-  if (backgroundRefreshInFlight) return;
-  backgroundRefreshInFlight = true;
+  // Cold start — cache is empty, fetch live synchronously.
   try {
-    const results = await Promise.all(FEEDS.map(fetchNewsData));
-    const articles = results.flat();
-    const seen = new Set<string>();
-    const deduped = articles.filter((a) => {
-      if (seen.has(a.url)) return false;
-      seen.add(a.url);
-      return true;
-    });
-    deduped.sort((a, b) => (a.publishedAt < b.publishedAt ? 1 : -1));
-    await persistToCache(deduped);
-  } finally {
-    backgroundRefreshInFlight = false;
+    const fresh = await fetchAndCache(feeds);
+    return opts?.category ? fresh.filter((a) => a.category === opts.category) : fresh;
+  } catch (e) {
+    console.error('news cold-start fetch failed', e);
+    return [];
   }
 }
