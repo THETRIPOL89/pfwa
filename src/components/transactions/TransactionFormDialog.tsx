@@ -103,7 +103,7 @@ export function TransactionFormDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent variant={initial ? 'modal' : 'sheet-bottom'}>
+      <DialogContent variant="modal">
         <DialogHeader>{initial ? 'Modifica transazione' : 'Nuova transazione'}</DialogHeader>
         <div className="space-y-4">
           <Segmented<TransactionKind>
